@@ -1,0 +1,8 @@
+pyautogui>=0.9.54
+paddlepaddle>=2.6.2
+paddleocr>=2.7.3
+opencv-python>=4.8.0
+arabic-reshaper>=3.0.0
+Polygon3>=3.0.9
+pyinstaller>=6.4.0
+Cython>=3.0.8
