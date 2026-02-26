@@ -1,6 +1,26 @@
-import ctypes
-import sys
 import os
+import sys
+import ctypes
+import threading
+import time
+import traceback
+import multiprocessing
+
+# ================== [新增] 解决底层冲突与防失控机制 ==================
+# 允许 PaddleOCR 底层的 OpenMP 库重复加载，防止循环时死锁崩溃
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+import pyautogui
+import numpy as np
+import cv2
+import tkinter as tk
+from tkinter import ttk
+from paddleocr import PaddleOCR
+import logging
+
+# 关闭 PyAutoGUI 的防失控机制，防止移动到屏幕边缘时触发异常导致线程暴毙
+pyautogui.FAILSAFE = False
+# ====================================================================
 
 # ================== [新增] 修复无控制台模式下 tqdm 报错问题 ==================
 # 如果标准输出/错误流为空（通常在 PyInstaller -w 模式下发生）
@@ -10,21 +30,6 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 # ==============================================================================
-
-# 告诉系统不要对鼠标坐标进行缩放偏移
-try:
-    ctypes.windll.user32.SetProcessDPIAware()
-except Exception:
-    pass
-
-import tkinter as tk
-from tkinter import ttk
-import threading
-import time
-import pyautogui
-# ... (保留你后面的所有代码)
-from paddleocr import PaddleOCR
-import logging
 
 # 告诉系统不要对鼠标坐标进行缩放偏移
 try:
@@ -175,191 +180,207 @@ class AutoClickerApp:
         self.root.attributes("-topmost", True)
 
     def automation_loop(self, p):
-        times = p["scroll_times"]
-        mode = p["scroll_mode"]
-        
-        current_smart_dir = "down" 
-        
-        if "仅向下滑动" in mode:
-            scroll_sequence = ["down"] * times + ["refresh"]
-        elif "仅向上滑动" in mode:
-            scroll_sequence = ["up"] * times + ["refresh"]
-        elif "智能滑动" in mode:
-            scroll_sequence = ["down"] * times + ["refresh"]
-        else:
-            scroll_sequence = ["down"] * times + ["up"] * times + ["refresh"]
+        # [新增] 加上异常捕获防弹衣，避免崩溃被黑洞吞噬
+        try:
+            times = p["scroll_times"]
+            mode = p["scroll_mode"]
             
-        scroll_index = 0 
-        screen_w, screen_h = pyautogui.size() 
-        
-        while self.running:
-            if p["detect_freq"] > 0:
-                time.sleep(p["detect_freq"])
-                
-            self.update_status("正在截图并分析数据源...", "blue") 
+            current_smart_dir = "down" 
             
-            try:
-                screenshot = pyautogui.screenshot()
-                screenshot.save("temp_screen.png")
-                result = self.ocr.ocr("temp_screen.png", cls=False)
-            except Exception as e:
-                print(f"识别发生异常: {e}")
-                time.sleep(1)
-                continue
+            if "仅向下滑动" in mode:
+                scroll_sequence = ["down"] * times + ["refresh"]
+            elif "仅向上滑动" in mode:
+                scroll_sequence = ["up"] * times + ["refresh"]
+            elif "智能滑动" in mode:
+                scroll_sequence = ["down"] * times + ["refresh"]
+            else:
+                scroll_sequence = ["down"] * times + ["up"] * times + ["refresh"]
+                
+            scroll_index = 0 
+            screen_w, screen_h = pyautogui.size() 
             
-            if not result or not result[0]:
-                time.sleep(1)
-                continue
-
-            all_items = []
-            refresh_btn_pos = None
-            
-            for line in result[0]:
-                if line is None:
-                    continue
-                box = line[0] 
-                text = line[1][0] 
-                
-                y_center = (box[0][1] + box[2][1]) / 2
-                x_center = (box[0][0] + box[1][0]) / 2
-                
-                if text in ["开始运行", "停止运行", "目标设置", "时间与频率", "状态:"] or "设置" in text or "滑动" in text:
-                    continue
-                
-                if "刷新" in text:
-                    refresh_btn_pos = (x_center, y_center)
-                    continue
+            while self.running:
+                if p["detect_freq"] > 0:
+                    time.sleep(p["detect_freq"])
                     
-                all_items.append({'text': text, 'x': x_center, 'y': y_center})
+                self.update_status("正在截图并分析数据源...", "blue") 
+                
+                try:
+                    # 内存直读法：摒弃保存本地文件，杜绝 exe 权限冲突与文件锁
+                    screenshot = pyautogui.screenshot()
+                    # 将 PIL 截图直接转为 OpenCV 需要的 BGR 数组格式
+                    img_array = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                    
+                    # 直接将内存里的数组喂给 OCR
+                    result = self.ocr.ocr(img_array, cls=False)
+                    
+                except Exception as e:
+                    # 哪怕报错，也尽量在控制台或系统日志里留个底
+                    print(f"识别发生异常: {e}")
+                    time.sleep(1)
+                    continue
+                
+                if not result or not result[0]:
+                    time.sleep(1)
+                    continue
 
-            accept_buttons = []
-            for item in all_items:
-                txt = item['text']
-                if ("接取" in txt or "按取" in txt or "运送" in txt) and "列表" not in txt:
-                    if item['x'] > screen_w * 0.5: 
-                        accept_buttons.append(item)
-            
-            match_found = False
-            
-            for btn in accept_buttons:
-                btn_y = btn['y']
-                row_texts = [item['text'] for item in all_items if abs(item['y'] - btn_y) < 80]
+                all_items = []
+                refresh_btn_pos = None
                 
-                frag_match = False
-                dest_match = False
+                for line in result[0]:
+                    if line is None:
+                        continue
+                    box = line[0] 
+                    text = line[1][0] 
+                    
+                    y_center = (box[0][1] + box[2][1]) / 2
+                    x_center = (box[0][0] + box[1][0]) / 2
+                    
+                    if text in ["开始运行", "停止运行", "目标设置", "时间与频率", "状态:"] or "设置" in text or "滑动" in text:
+                        continue
+                    
+                    if "刷新" in text:
+                        refresh_btn_pos = (x_center, y_center)
+                        continue
+                        
+                    all_items.append({'text': text, 'x': x_center, 'y': y_center})
+
+                accept_buttons = []
+                for item in all_items:
+                    txt = item['text']
+                    if ("接取" in txt or "按取" in txt or "运送" in txt) and "列表" not in txt:
+                        if item['x'] > screen_w * 0.5: 
+                            accept_buttons.append(item)
                 
-                for txt in row_texts:
-                    target_frag = p["fragility"]
-                    if target_frag == "不限":
-                        frag_match = True
-                    elif target_frag == "不易损" and "不易损" in txt:
-                        frag_match = True
-                    elif target_frag == "极易损" and "极易损" in txt:
-                        frag_match = True
-                    elif target_frag == "易损":
-                        if "易损" in txt and "不易损" not in txt and "极易损" not in txt:
+                match_found = False
+                
+                for btn in accept_buttons:
+                    btn_y = btn['y']
+                    row_texts = [item['text'] for item in all_items if abs(item['y'] - btn_y) < 80]
+                    
+                    frag_match = False
+                    dest_match = False
+                    
+                    for txt in row_texts:
+                        target_frag = p["fragility"]
+                        if target_frag == "不限":
                             frag_match = True
+                        elif target_frag == "不易损" and "不易损" in txt:
+                            frag_match = True
+                        elif target_frag == "极易损" and "极易损" in txt:
+                            frag_match = True
+                        elif target_frag == "易损":
+                            if "易损" in txt and "不易损" not in txt and "极易损" not in txt:
+                                frag_match = True
 
-                    clean_txt = txt.replace("(", "").replace(")", "").replace("（", "").replace("）", "")
-                    if p["destination"] == "不限" or p["destination"] in clean_txt:
-                        dest_match = True
-                        
-                if frag_match and dest_match:
-                    self.update_status(f"🎯 成功锁定目标并点击！验证中...", "green")
-                    print(f"===> 确认接取该行: {row_texts}")
-                    
-                    pyautogui.moveTo(btn['x'], btn['y'], duration=0.2)
-                    time.sleep(0.1) 
-                    pyautogui.mouseDown()
-                    time.sleep(0.05) 
-                    pyautogui.mouseUp()
-                    
-                    # ================== [新增] 接取失败验证逻辑 ==================
-                    # 点击后等待 1.5 秒，让游戏的“失败”提示框有时间弹出来
-                    time.sleep(1.5) 
-                    
-                    try:
-                        check_screen = pyautogui.screenshot()
-                        check_result = self.ocr.ocr(check_screen, cls=False)
-                        
-                        is_failed = False
-                        if check_result and check_result[0]:
-                            for check_line in check_result[0]:
-                                if check_line is None: continue
-                                check_text = check_line[1][0]
-                                # 只要捕捉到“失败”这两个字，或者完整的句子，就判定为接取失败
-                                if "委托失败" in check_text:
-                                    is_failed = True
-                                    break
-                        
-                        if is_failed:
-                            self.update_status("⚠️ 检测到接取失败，放弃当前目标！", "orange")
-                            print("===> 提示接取失败，继续寻找下一个目标。")
-                            # 点击一下屏幕左上角安全区域，以关闭可能残留的提示弹窗
-                            pyautogui.click(10, 10)
-                            time.sleep(0.5)
+                        clean_txt = txt.replace("(", "").replace(")", "").replace("（", "").replace("）", "")
+                        if p["destination"] == "不限" or p["destination"] in clean_txt:
+                            dest_match = True
                             
-                            # 将 match_found 保持为 False，并 break 出当前的接取循环
-                            # 这样程序就会当做“当前页没找到”，从而继续执行滚动或刷新逻辑
-                            match_found = False
-                            break 
-                        else:
-                            # 如果没有检测到失败，则判定为真正接取成功，结束脚本
-                            self.update_status("🎉 接取成功！任务完成。", "green")
-                            match_found = True
-                            self.root.after(0, self.stop_script) 
-                            return 
-
-                    except Exception as e:
-                        print(f"验证结果时发生异常: {e}")
-                        # 验证环节哪怕报错了，保险起见还是停止运行
-                        self.root.after(0, self.stop_script) 
-                        return
-                    # ==============================================================
-
-            if not match_found and self.running:
-                action = scroll_sequence[scroll_index]
-                
-                if action == "down" or action == "up":
-                    self.update_status(f"当前页未找到或接取失败，向{ '下' if action == 'down' else '上' }滑动...", "orange")
-                    pyautogui.moveTo(screen_w * 0.7, screen_h * 0.5)
-                    time.sleep(0.1)
-                    
-                    if "拖拽" in p["scroll_method"]:
-                        drag_y = -p["scroll_dist"] if action == "down" else p["scroll_dist"]
-                        pyautogui.dragRel(0, drag_y, duration=0.5, button='left')
-                    else:
-                        scroll_val = -p["scroll_dist"] if action == "down" else p["scroll_dist"]
-                        pyautogui.scroll(scroll_val) 
+                    if frag_match and dest_match:
+                        self.update_status(f"🎯 成功锁定目标并点击！验证中...", "green")
+                        print(f"===> 确认接取该行: {row_texts}")
                         
-                    pyautogui.moveTo(10, 10, duration=0.1) 
-                    time.sleep(1.5) 
-                    scroll_index += 1
-                    
-                elif action == "refresh":
-                    self.update_status(f"列表已阅毕，点击刷新... 等待 {p['refresh_interval']} 秒", "purple")
-                    if refresh_btn_pos:
-                        pyautogui.moveTo(refresh_btn_pos[0], refresh_btn_pos[1], duration=0.2)
-                        time.sleep(0.1)
+                        pyautogui.moveTo(btn['x'], btn['y'], duration=0.2)
+                        time.sleep(0.1) 
                         pyautogui.mouseDown()
-                        time.sleep(0.05)
+                        time.sleep(0.05) 
                         pyautogui.mouseUp()
-                        pyautogui.moveTo(10, 10, duration=0.1)
-                    else:
-                        print("未能找到刷新按钮")
-                    
-                    time.sleep(p['refresh_interval']) 
-                    scroll_index = 0 
+                        
+                        # ================== 接取失败验证逻辑 ==================
+                        time.sleep(1.5) 
+                        
+                        try:
+                            check_screen = pyautogui.screenshot()
+                            check_array = cv2.cvtColor(np.array(check_screen), cv2.COLOR_RGB2BGR)
+                            check_result = self.ocr.ocr(check_array, cls=False)
+                            
+                            is_failed = False
+                            if check_result and check_result[0]:
+                                for check_line in check_result[0]:
+                                    if check_line is None: continue
+                                    check_text = check_line[1][0]
+                                    if "委托失败" in check_text:
+                                        is_failed = True
+                                        break
+                            
+                            if is_failed:
+                                self.update_status("⚠️ 检测到接取失败，放弃当前目标！", "orange")
+                                print("===> 提示接取失败，继续寻找下一个目标。")
+                                # [修改] 绝对安全区点击，防触发异常
+                                pyautogui.click(100, 100)
+                                time.sleep(0.5)
+                                
+                                match_found = False
+                                break 
+                            else:
+                                self.update_status("🎉 接取成功！任务完成。", "green")
+                                match_found = True
+                                self.root.after(0, self.stop_script) 
+                                return 
 
-                    if "智能滑动" in mode:
-                        if current_smart_dir == "down":
-                            current_smart_dir = "up"
-                            scroll_sequence = ["up"] * times + ["refresh"]
-                            print(f"\n🔁 智能翻转: 下一步路线切换为 [向上滑动]")
+                        except Exception as e:
+                            print(f"验证结果时发生异常: {e}")
+                            self.root.after(0, self.stop_script) 
+                            return
+                        # ==============================================================
+
+                if not match_found and self.running:
+                    action = scroll_sequence[scroll_index]
+                    
+                    if action == "down" or action == "up":
+                        self.update_status(f"当前页未找到或接取失败，向{ '下' if action == 'down' else '上' }滑动...", "orange")
+                        pyautogui.moveTo(screen_w * 0.7, screen_h * 0.5)
+                        time.sleep(0.1)
+                        
+                        if "拖拽" in p["scroll_method"]:
+                            drag_y = -p["scroll_dist"] if action == "down" else p["scroll_dist"]
+                            pyautogui.dragRel(0, drag_y, duration=0.5, button='left')
                         else:
-                            current_smart_dir = "down"
-                            scroll_sequence = ["down"] * times + ["refresh"]
-                            print(f"\n🔁 智能翻转: 下一步路线切换为 [向下滑动]")
+                            scroll_val = -p["scroll_dist"] if action == "down" else p["scroll_dist"]
+                            pyautogui.scroll(scroll_val) 
+                            
+                        # [修改] 滑动后复位鼠标到绝对安全区
+                        pyautogui.moveTo(100, 100, duration=0.1) 
+                        time.sleep(1.5) 
+                        scroll_index += 1
+                        
+                    elif action == "refresh":
+                        self.update_status(f"列表已阅毕，点击刷新... 等待 {p['refresh_interval']} 秒", "purple")
+                        if refresh_btn_pos:
+                            pyautogui.moveTo(refresh_btn_pos[0], refresh_btn_pos[1], duration=0.2)
+                            time.sleep(0.1)
+                            pyautogui.mouseDown()
+                            time.sleep(0.05)
+                            pyautogui.mouseUp()
+                            # [修改] 点击刷新后复位鼠标到绝对安全区
+                            pyautogui.moveTo(100, 100, duration=0.1)
+                        else:
+                            print("未能找到刷新按钮")
+                        
+                        time.sleep(p['refresh_interval']) 
+                        scroll_index = 0 
+
+                        if "智能滑动" in mode:
+                            if current_smart_dir == "down":
+                                current_smart_dir = "up"
+                                scroll_sequence = ["up"] * times + ["refresh"]
+                                print(f"\n🔁 智能翻转: 下一步路线切换为 [向上滑动]")
+                            else:
+                                current_smart_dir = "down"
+                                scroll_sequence = ["down"] * times + ["refresh"]
+                                print(f"\n🔁 智能翻转: 下一步路线切换为 [向下滑动]")
+
+        except Exception as e:
+            # 捕获整个循环中的任何致命崩溃并写入日志
+            error_msg = traceback.format_exc()
+            with open("crash_log.txt", "w", encoding="utf-8") as f:
+                f.write(f"小助手后台线程崩溃了：\n{error_msg}")
+            
+            self.update_status("❌ 运行崩溃！已在目录生成 crash_log.txt", "red")
+            self.running = False
+            self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
+            self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
 
 # ================== 提权检测函数 ==================
 def is_admin():
@@ -370,6 +391,15 @@ def is_admin():
 
 # ================== 启动入口 ==================
 if __name__ == "__main__":
+    # 必须放在入口第一行！防止打包后多进程死锁
+    multiprocessing.freeze_support()
+    
+    # 防止管理员提权后，工作目录漂移到 C:\Windows\System32 导致各种玄学报错
+    if getattr(sys, 'frozen', False):
+        os.chdir(os.path.dirname(sys.executable))
+    else:
+        os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
     if is_admin():
         root = tk.Tk()
         app = AutoClickerApp(root)
