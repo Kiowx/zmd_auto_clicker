@@ -147,7 +147,7 @@ python main.py
 pip install pyinstaller
 
 # 一键打包（无控制台窗口）
-pyinstaller -F -w -i icon.ico main.py
+pyinstaller -F -w -i main.py
 ```
 
 ### 参数说明
@@ -229,8 +229,8 @@ pyinstaller -F -w -i icon.ico main.py
 ### 开发环境搭建
 
 ```bash
-git clone https://github.com/your-username/endfield-express.git
-cd endfield-express
+git clone https://github.com/Kiowx/zmd_auto_clicker.git
+cd zmd_auto_clicker
 pip install -r requirements.txt
 ```
 
